@@ -777,6 +777,141 @@ class IRGenerator(Visitor):
         self.builder.store(value, ptr)
         return value
 
+    def visit_ifstatement(self, node: IfStatement) -> None:
+        cond = self.to_bool(node.condition.accept(self))
+        then_bb = self.current_function.append_basic_block("if.then")
+        else_bb = self.current_function.append_basic_block("if.else") if node.else_statement else None
+        end_bb = self.current_function.append_basic_block("if.end")
+
+        self.builder.cbranch(cond, then_bb, else_bb if else_bb else end_bb)
+        self.builder.position_at_end(then_bb)
+        node.then_statement.accept(self)
+        if not self.current_block_has_terminator():
+            self.builder.branch(end_bb)
+
+        if node.else_statement:
+            self.builder.position_at_end(else_bb)
+            node.else_statement.accept(self)
+            if not self.current_block_has_terminator():
+                self.builder.branch(end_bb)
+
+        self.builder.position_at_end(end_bb)
+
+    def visit_whilestatement(self, node: WhileStatement) -> None:
+        cond_bb = self.current_function.append_basic_block("while.cond")
+        body_bb = self.current_function.append_basic_block("while.body")
+        end_bb = self.current_function.append_basic_block("while.end")
+        self.builder.branch(cond_bb)
+        self.builder.position_at_end(cond_bb)
+        self.builder.cbranch(self.to_bool(node.condition.accept(self)), body_bb, end_bb)
+        self.builder.position_at_end(body_bb)
+        self.break_stack.append(end_bb)
+        self.continue_stack.append(cond_bb)
+        node.statement.accept(self)
+        self.continue_stack.pop()
+        self.break_stack.pop()
+        if not self.current_block_has_terminator():
+            self.builder.branch(cond_bb)
+        self.builder.position_at_end(end_bb)
+
+    def visit_forstatement(self, node: ForStatement) -> None:
+        if node.init is not None:
+            if isinstance(node.init, list):
+                for declaration in node.init:
+                    declaration.accept(self)
+            else:
+                node.init.accept(self)
+        cond_bb = self.current_function.append_basic_block("for.cond")
+        body_bb = self.current_function.append_basic_block("for.body")
+        step_bb = self.current_function.append_basic_block("for.step")
+        end_bb = self.current_function.append_basic_block("for.end")
+        self.builder.branch(cond_bb)
+        self.builder.position_at_end(cond_bb)
+        cond = node.condition.accept(self) if node.condition is not None else ir.Constant(ir.IntType(1), 1)
+        self.builder.cbranch(self.to_bool(cond), body_bb, end_bb)
+        self.builder.position_at_end(body_bb)
+        self.break_stack.append(end_bb)
+        self.continue_stack.append(step_bb)
+        node.statement.accept(self)
+        self.continue_stack.pop()
+        self.break_stack.pop()
+        if not self.current_block_has_terminator():
+            self.builder.branch(step_bb)
+        self.builder.position_at_end(step_bb)
+        if node.update is not None:
+            node.update.accept(self)
+        self.builder.branch(cond_bb)
+        self.builder.position_at_end(end_bb)
+
+    def visit_dowhilestatement(self, node: DoWhileStatement) -> None:
+        body_bb = self.current_function.append_basic_block("do.body")
+        cond_bb = self.current_function.append_basic_block("do.cond")
+        end_bb = self.current_function.append_basic_block("do.end")
+        self.builder.branch(body_bb)
+        self.builder.position_at_end(body_bb)
+        self.break_stack.append(end_bb)
+        self.continue_stack.append(cond_bb)
+        node.statement.accept(self)
+        self.continue_stack.pop()
+        self.break_stack.pop()
+        if not self.current_block_has_terminator():
+            self.builder.branch(cond_bb)
+        self.builder.position_at_end(cond_bb)
+        self.builder.cbranch(self.to_bool(node.condition.accept(self)), body_bb, end_bb)
+        self.builder.position_at_end(end_bb)
+
+    def visit_switchstatement(self, node: SwitchStatement) -> None:
+        value = self.cast(node.expression.accept(self), ir.IntType(32))
+        end_bb = self.current_function.append_basic_block("switch.end")
+        default_bb = self.current_function.append_basic_block("switch.default") if node.default else end_bb
+        case_blocks = [(case, self.current_function.append_basic_block("switch.case")) for case in node.cases]
+        switch = self.builder.switch(value, default_bb)
+        for case, block in case_blocks:
+            switch.add_case(ir.Constant(ir.IntType(32), int(case.value.value)), block)
+        self.break_stack.append(end_bb)
+        for case, block in case_blocks:
+            self.builder.position_at_end(block)
+            for statement in case.statements:
+                statement.accept(self)
+                if self.current_block_has_terminator():
+                    break
+            if not self.current_block_has_terminator():
+                self.builder.branch(end_bb)
+        if node.default:
+            self.builder.position_at_end(default_bb)
+            for statement in node.default.statements:
+                statement.accept(self)
+                if self.current_block_has_terminator():
+                    break
+            if not self.current_block_has_terminator():
+                self.builder.branch(end_bb)
+        self.break_stack.pop()
+        self.builder.position_at_end(end_bb)
+
+    def visit_breakstatement(self, node: BreakStatement) -> None:
+        if not self.break_stack:
+            raise SyntaxError("break can only be used inside switch or loop")
+        self.builder.branch(self.break_stack[-1])
+
+    def visit_continuestatement(self, node: ContinueStatement) -> None:
+        if not self.continue_stack:
+            raise SyntaxError("continue can only be used inside a loop")
+        self.builder.branch(self.continue_stack[-1])
+
+    def visit_returnstatement(self, node: ReturnStatement) -> None:
+        ret_type = self.current_function.function_type.return_type
+        if isinstance(ret_type, ir.VoidType):
+            self.builder.ret_void()
+            return
+        value = node.expression.accept(self) if node.expression is not None else ir.Constant(ret_type, 0)
+        self.builder.ret(self.cast(value, ret_type))
+
+    def visit_callstatement(self, node: CallStatement) -> None:
+        node.call.accept(self)
+
+    def visit_expressionstatement(self, node: ExpressionStatement) -> None:
+        node.expression.accept(self)
+
 
 
 def build_parser():
