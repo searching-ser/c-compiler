@@ -35,9 +35,8 @@ print(mod)
 
 # %%
 from llvmlite import binding as llvm
-llvm.initialize()
-llvm.initialize_native_asmprinter()
 llvm.initialize_native_target()
+llvm.initialize_native_asmprinter()
 target = llvm.Target.from_default_triple()
 target_machine = target.create_target_machine(codemodel='default')
 mod = llvm.parse_assembly(str(module))

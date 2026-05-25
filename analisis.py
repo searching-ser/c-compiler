@@ -912,6 +912,91 @@ class IRGenerator(Visitor):
     def visit_expressionstatement(self, node: ExpressionStatement) -> None:
         node.expression.accept(self)
 
+    def visit_literal(self, node: Literal):
+        if node.type == "int":
+            return ir.Constant(ir.IntType(32), node.value)
+        if node.type == "float":
+            return ir.Constant(ir.DoubleType(), node.value)
+        if node.type == "char":
+            return ir.Constant(ir.IntType(8), node.value)
+        if node.type == "bool":
+            return ir.Constant(ir.IntType(1), node.value)
+        if node.type == "string":
+            return self.global_string(node.value)
+        raise TypeError(f"Unknown literal type '{node.type}'")
+
+    def global_string(self, text: str):
+        text = text + "\0"
+        data = bytearray(text.encode("utf8"))
+        typ = ir.ArrayType(ir.IntType(8), len(data))
+        name = f".str.{self.string_count}"
+        self.string_count += 1
+        glob = ir.GlobalVariable(self.module, typ, name=name)
+        glob.global_constant = True
+        glob.linkage = "internal"
+        glob.initializer = ir.Constant(typ, data)
+        zero = ir.Constant(ir.IntType(32), 0)
+        return self.builder.gep(glob, [zero, zero], inbounds=True)
+
+    def visit_variable(self, node: Variable):
+        ptr, _ = self.find_symbol(node.name)
+        return self.builder.load(ptr, name=node.name)
+
+    def visit_arrayref(self, node: ArrayRef):
+        ptr, _ = self.location_ptr(node)
+        return self.builder.load(ptr, name=node.name)
+
+    def visit_binaryop(self, node: BinaryOp):
+        lhs = node.lhs.accept(self)
+        rhs = node.rhs.accept(self)
+
+        if node.op in ("&&", "||"):
+            lhs = self.to_bool(lhs)
+            rhs = self.to_bool(rhs)
+            return self.builder.and_(lhs, rhs) if node.op == "&&" else self.builder.or_(lhs, rhs)
+
+        lhs, rhs = self.promote(lhs, rhs)
+        is_float = isinstance(lhs.type, ir.DoubleType)
+
+        if node.op == "+":
+            return self.builder.fadd(lhs, rhs) if is_float else self.builder.add(lhs, rhs)
+        if node.op == "-":
+            return self.builder.fsub(lhs, rhs) if is_float else self.builder.sub(lhs, rhs)
+        if node.op == "*":
+            return self.builder.fmul(lhs, rhs) if is_float else self.builder.mul(lhs, rhs)
+        if node.op == "/":
+            return self.builder.fdiv(lhs, rhs) if is_float else self.builder.sdiv(lhs, rhs)
+        if node.op == "%":
+            return self.builder.srem(lhs, rhs)
+        if node.op in ("==", "!=", "<", ">", "<=", ">="):
+            if is_float:
+                pred = {"==": "==", "!=": "!=", "<": "<", ">": ">", "<=": "<=", ">=": ">="}[node.op]
+                return self.builder.fcmp_ordered(pred, lhs, rhs)
+            pred = {"==": "==", "!=": "!=", "<": "<", ">": ">", "<=": "<=", ">=": ">="}[node.op]
+            return self.builder.icmp_signed(pred, lhs, rhs)
+        raise TypeError(f"Unsupported binary operator '{node.op}'")
+
+    def visit_unaryop(self, node: UnaryOp):
+        value = node.expression.accept(self)
+        if node.op == "-":
+            if isinstance(value.type, ir.DoubleType):
+                return self.builder.fsub(ir.Constant(value.type, 0.0), value)
+            return self.builder.sub(ir.Constant(value.type, 0), value)
+        if node.op == "!":
+            return self.builder.not_(self.to_bool(value))
+        raise TypeError(f"Unsupported unary operator '{node.op}'")
+
+    def visit_call(self, node: Call):
+        if node.name == "printf":
+            args = [arg.accept(self) for arg in node.args]
+            return self.builder.call(self.printf, args)
+        if node.name not in self.functions:
+            raise NameError(f"Function '{node.name}' was not declared")
+        func = self.functions[node.name]
+        args = []
+        for value_node, expected in zip(node.args, func.function_type.args):
+            args.append(self.cast(value_node.accept(self), expected))
+        return self.builder.call(func, args)
 
 
 def build_parser():
