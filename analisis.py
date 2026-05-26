@@ -21,7 +21,6 @@ from arbol import (
     EmptyStatement,
     ForStatement,
     Function,
-    FunctionPrototype,
     IfStatement,
     Literal,
     Parameter,
@@ -170,7 +169,6 @@ def p_external_list(p):
 def p_external(p):
     """
     external : function_definition
-             | function_prototype
              | global_declaration
     """
     p[0] = p[1]
@@ -180,11 +178,6 @@ def p_function_definition(p):
     "function_definition : type ID '(' parameters_opt ')' compound_statement"
     block = p[6]
     p[0] = Function(p[2], p[1], p[4], block.declarations, block.statements)
-
-
-def p_function_prototype(p):
-    "function_prototype : type ID '(' parameters_opt ')' ';'"
-    p[0] = FunctionPrototype(p[2], p[1], p[4])
 
 
 def p_global_declaration(p):
@@ -677,7 +670,7 @@ class IRGenerator(Visitor):
             if isinstance(item, list):
                 for declaration in item:
                     self.declare_global(declaration)
-            elif isinstance(item, (Function, FunctionPrototype)):
+            elif isinstance(item, Function):
                 self.declare_function(item)
         for item in node.declarations:
             if isinstance(item, Function):

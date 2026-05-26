@@ -31,13 +31,6 @@ class Function(ASTNode):
         self.statements = statements
 
 
-class FunctionPrototype(ASTNode):
-    def __init__(self, name: str, return_type: str, params: list[Parameter]) -> None:
-        self.name = name
-        self.return_type = return_type
-        self.params = params
-
-
 class Parameter(ASTNode):
     def __init__(self, name: str, type: str) -> None:
         self.name = name
